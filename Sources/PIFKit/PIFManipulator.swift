@@ -24,6 +24,53 @@ package final class PIFManipulator {
         }
     }
 
+    /// Host macro implementations are supplied separately; omit their framework build edges.
+    package func pruneDependencies(keepingTargetNames names: Set<String>) {
+        let targets = topLevelObject.arrayValue.filter { $0["type"].stringValue == "target" }
+        var allowedGUIDs = Set(targets.compactMap { object -> String? in
+            let contents = object["contents"]
+            guard names.contains(contents["name"].stringValue)
+                || contents["productTypeIdentifier"].stringValue == "com.apple.product-type.bundle" else { return nil }
+            return contents["guid"].stringValue
+        })
+        // SwiftPM gives product wrappers generated names; retain wrappers that lead to runtime targets.
+        var changed: Bool
+        repeat {
+            changed = false
+            for object in targets {
+                let contents = object["contents"]
+                let guid = contents["guid"].stringValue
+                guard guid.hasPrefix("PACKAGE-PRODUCT:"),
+                      contents["dependencies"].arrayValue.contains(where: { allowedGUIDs.contains($0["guid"].stringValue) }) else { continue }
+                if allowedGUIDs.insert(guid).inserted { changed = true }
+            }
+        } while changed
+        for index in 0..<topLevelObject.arrayValue.count {
+            guard topLevelObject[index]["type"].stringValue == "target" else { continue }
+            let dependencies = topLevelObject[index]["contents"]["dependencies"].arrayValue
+            topLevelObject[index]["contents"]["dependencies"] = JSON(dependencies.filter {
+                allowedGUIDs.contains($0["guid"].stringValue)
+            })
+        }
+    }
+
+    /// Use SwiftPM's resolved graph so disabled package traits do not add linker flags.
+    package func dependencyNamesByTarget() -> [String: Set<String>] {
+        let targets = topLevelObject.arrayValue.filter { $0["type"].stringValue == "target" }.map { $0["contents"] }
+        let byGUID = Dictionary(uniqueKeysWithValues: targets.map { ($0["guid"].stringValue, $0) })
+        return Dictionary(uniqueKeysWithValues: targets.map { target in
+            var names = Set<String>()
+            var visited = Set<String>()
+            func visit(_ guid: String) {
+                guard visited.insert(guid).inserted, let dependency = byGUID[guid] else { return }
+                names.insert(dependency["name"].stringValue)
+                for child in dependency["dependencies"].arrayValue { visit(child["guid"].stringValue) }
+            }
+            for dependency in target["dependencies"].arrayValue { visit(dependency["guid"].stringValue) }
+            return (target["name"].stringValue, names)
+        })
+    }
+
     /// Dump manipulating JSON data
     /// - Returns: JSON data
     package func dump() throws -> Data {

@@ -42,3 +42,34 @@ struct PIFManipulatorTests {
         #expect(dumpedString.contains("MY_VALUE"))
     }
 }
+
+extension PIFManipulatorTests {
+    /// Runtime wrappers, resource bundles, and system headers survive while macro host edges are removed.
+    @Test
+    func preservesRuntimeGraphWithoutMacroImplementations() throws {
+        func target(_ name: String, guid: String? = nil, dependencies: [String] = [], bundle: Bool = false) -> [String: Any] {
+            ["type": "target", "contents": [
+                "name": name, "guid": guid ?? name,
+                "productTypeIdentifier": bundle ? "com.apple.product-type.bundle" : "com.apple.product-type.objfile",
+                "dependencies": dependencies.map { ["guid": $0] },
+            ]]
+        }
+        let input = [
+            target("App", dependencies: ["PACKAGE-PRODUCT:Outer", "Macro", "SwiftSyntax", "Resources"]),
+            target("OuterProduct", guid: "PACKAGE-PRODUCT:Outer", dependencies: ["PACKAGE-PRODUCT:Inner"]),
+            target("InnerProduct", guid: "PACKAGE-PRODUCT:Inner", dependencies: ["Runtime"]),
+            target("Runtime", dependencies: ["Headers", "Macro", "Resources"]),
+            target("Headers"), target("Resources", bundle: true),
+            target("Macro", dependencies: ["SwiftSyntax"]), target("SwiftSyntax"),
+            // Disabled trait dependencies are absent from SwiftPM's resolved graph.
+            target("DisabledTraitLibrary"),
+        ]
+        let manipulator = try PIFManipulator(jsonData: JSONSerialization.data(withJSONObject: input))
+        manipulator.pruneDependencies(keepingTargetNames: ["App", "Runtime", "Headers"])
+        let dependencies = manipulator.dependencyNamesByTarget()
+        #expect(dependencies["App"] == ["OuterProduct", "InnerProduct", "Runtime", "Headers", "Resources"])
+        #expect(dependencies["Runtime"] == ["Headers", "Resources"])
+        #expect(dependencies["Headers"] == [])
+    }
+
+}

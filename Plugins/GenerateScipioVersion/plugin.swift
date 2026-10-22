@@ -20,10 +20,11 @@ struct GenerateScipioVersion: BuildToolPlugin {
             fileContents = #"let currentScipioVersion: String? = nil"#
         }
 
-        FileManager.default.createFile(
-            atPath: generatedSourcePath.path(),
-            contents: fileContents.data(using: .utf8)
-        )
+        // Preserve the timestamp when unchanged so app builds do not recompile ScipioKit.
+        let data = Data(fileContents.utf8)
+        if (try? Data(contentsOf: generatedSourcePath)) != data {
+            try data.write(to: generatedSourcePath)
+        }
 
         return [
             .prebuildCommand(

@@ -50,9 +50,23 @@ struct PIFGenerator {
 
     func generateJSON(for sdk: SDK) async throws -> Foundation.URL {
         let manipulator = try await buildPIFManipulator()
+        // SwiftPM flattens macro implementation dependencies into consumer targets.
+        // Retain regular, binary, and header-only runtime targets, pruning macro subtrees.
+        let roots = allModules.filter { $0.localPackageURL.path == packageLocator.packageDirectory.path }
+        var libraryNames = Set<String>()
+        func visit(_ module: ResolvedModule) {
+            guard module.underlying.type.isFrameworkProducible,
+                  libraryNames.insert(module.name).inserted else { return }
+            for dependency in module.dependencies {
+                for child in dependency.modules { visit(child) }
+            }
+        }
+        for root in roots { visit(root) }
+        manipulator.pruneDependencies(keepingTargetNames: libraryNames)
 
+        let dependencyNames = manipulator.dependencyNamesByTarget()
         manipulator.updateTargets { target in
-            updateTarget(&target, sdk: sdk)
+            updateTarget(&target, sdk: sdk, dependencyNames: dependencyNames[target.name] ?? [])
         }
 
         let newJSONData = try manipulator.dump()
@@ -63,10 +77,10 @@ struct PIFGenerator {
         return path
     }
 
-    private func updateTarget(_ target: inout PIFKit.Target, sdk: SDK) {
+    private func updateTarget(_ target: inout PIFKit.Target, sdk: SDK, dependencyNames: Set<String>) {
         switch target.productType {
         case .objectFile:
-            updateObjectFileTarget(&target, sdk: sdk)
+            updateObjectFileTarget(&target, sdk: sdk, dependencyNames: dependencyNames)
         case .bundle:
             generateInfoPlistForResource(for: &target)
         default:
@@ -74,15 +88,15 @@ struct PIFGenerator {
         }
     }
 
-    private func updateObjectFileTarget(_ target: inout PIFKit.Target, sdk: SDK) {
+    private func updateObjectFileTarget(_ target: inout PIFKit.Target, sdk: SDK, dependencyNames: Set<String>) {
         target.productType = .framework
 
         for index in 0..<target.buildConfigurations.count {
-            updateBuildConfiguration(&target.buildConfigurations[index], target: target, sdk: sdk)
+            updateBuildConfiguration(&target.buildConfigurations[index], target: target, sdk: sdk, dependencyNames: dependencyNames)
         }
     }
 
-    private func updateBuildConfiguration(_ configuration: inout PIFKit.BuildConfiguration, target: PIFKit.Target, sdk: SDK) {
+    private func updateBuildConfiguration(_ configuration: inout PIFKit.BuildConfiguration, target: PIFKit.Target, sdk: SDK, dependencyNames: Set<String>) {
         let name = target.name
 
 #if compiler(>=6.1)
@@ -141,7 +155,9 @@ struct PIFGenerator {
             }
 
             let moduleDependenciesPerPlatforms = categorizeModuleDependenciesByPlatform(
-                resolvedTarget.recursiveFrameworkLinkableDependencies()
+                resolvedTarget.recursiveFrameworkLinkableDependencies().filter { dependency in
+                    dependency.modules.contains { dependencyNames.contains($0.name) }
+                }
             )
 
             for (platforms, dependencies) in moduleDependenciesPerPlatforms {

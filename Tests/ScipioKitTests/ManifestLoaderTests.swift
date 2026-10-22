@@ -60,3 +60,35 @@ struct ManifestLoaderTests {
         #expect(manifest.name == "MyFramework")
     }
 }
+
+extension ManifestLoaderTests {
+    /// SwiftPM emits positional provider arguments for both package and system-target providers.
+    @Test(arguments: ["apt", "brew", "yum", "nuget"])
+    func decodesSystemPackageProviders(provider: String) async throws {
+        let packages = ["sqlite3", "another-library"]
+        let providers: [[String: Any]] = [[provider: [packages]]]
+        let payload: [String: Any] = [
+            "name": "SystemLibrary", "toolsVersion": ["_version": "6.4.0"],
+            "dependencies": [], "products": [], "providers": providers,
+            "packageKind": ["root": ["/tmp/SystemLibrary"]],
+            "targets": [[
+                "name": "SQLite", "type": "system", "packageAccess": false,
+                "dependencies": [], "resources": [], "exclude": [], "settings": [],
+                "providers": providers,
+            ]],
+        ]
+        let json = String(decoding: try JSONSerialization.data(withJSONObject: payload), as: UTF8.self)
+        let executor = StubbableExecutor { arguments in
+            StubbableExecutorResult(arguments: arguments, success: json)
+        }
+        let manifest = try await ManifestLoader(executor: executor).loadManifest(for: URL(filePath: "/tmp/SystemLibrary"))
+        let encoded = try JSONEncoder().encode(manifest)
+        let decoded = try #require(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        let packageProviders = try #require(decoded["providers"] as? [[String: [String: [String]]]])
+        let targets = try #require(decoded["targets"] as? [[String: Any]])
+        let target = try #require(targets.first)
+        let targetProviders = try #require(target["providers"] as? [[String: [String: [String]]]])
+        #expect(packageProviders.first?[provider]?["_0"] == packages)
+        #expect(targetProviders.first?[provider]?["_0"] == packages)
+    }
+}
